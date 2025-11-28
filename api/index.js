@@ -1,16 +1,18 @@
 // ================= CONFIGURATION =================
 const CONFIG = {
-    YOUR_API_KEYS: ["SPLEXXO_INSTA", "TESTKEY"], // Apni Keys yahan daalo
+    YOUR_API_KEYS: ["SPLEXXO_INSTA", "TESTKEY"], 
     
-    // ✅ Maine yahan ek Working Public API laga di hai
-    // Ye API free hai aur Instagram ka data nikal kar deti hai
-    TARGET_API_BASE: "https://api.nyxs.pw/dl/ig?url=", 
+    // 🔥 PRO FEATURE: MULTIPLE APIs (Agar ek fail ho to dusra chalega)
+    API_SOURCES: [
+        "https://api.siputzx.my.id/api/d/ig?url=",  // Source 1 (Fast)
+        "https://api.agatz.xyz/api/instagram?url="  // Source 2 (Backup)
+    ],
 
     CACHE_TIME: 30 * 60 * 1000, // 30 Minutes Cache
     
     BRANDING: {
         service: "Splexxo-Insta-Pro",
-        type: "Premium Downloader",
+        type: "Auto-Switching Server",
         powered_by: "Splexxo Infrastructure"
     }
 };
@@ -18,8 +20,17 @@ const CONFIG = {
 
 const cache = new Map();
 
+// Helper function to fetch with timeout
+const fetchWithTimeout = async (url, options = {}, timeout = 8000) => {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(id);
+    return response;
+};
+
 export default async function handler(req, res) {
-    // 1. CORS Headers (Sab jagah chalne ke liye)
+    // 1. CORS Headers
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -53,67 +64,84 @@ export default async function handler(req, res) {
         return res.status(200).json(cachedData.response);
     }
 
-    // 5. Upstream API Call (Asli kaam yahan ho raha hai)
-    try {
-        const targetUrl = `${CONFIG.TARGET_API_BASE}${encodeURIComponent(instaUrl)}`;
-        const upstreamResponse = await fetch(targetUrl);
-        
-        if (!upstreamResponse.ok) {
-            throw new Error(`Upstream API Error: ${upstreamResponse.status}`);
-        }
+    // 5. SMART FETCH SYSTEM (Loop through APIs)
+    let finalData = null;
+    let successSource = "";
 
-        const data = await upstreamResponse.json();
+    for (const apiBase of CONFIG.API_SOURCES) {
+        try {
+            const targetUrl = `${apiBase}${encodeURIComponent(instaUrl)}`;
+            console.log(`Trying source: ${apiBase}`); // Log for debugging
 
-        // 6. Data Validation (Kya data sahi aaya?)
-        if (!data.status && data.message !== "success") {
-             throw new Error("Instagram API returned invalid data.");
-        }
+            const response = await fetchWithTimeout(targetUrl);
+            
+            if (!response.ok) continue; // Agar error hai to next API try karo
 
-        // 7. Data Cleaning & Rebranding
-        // (Hum check karenge ki video hai ya image aur use nikalenge)
-        const resultData = data.result || data.data; // API format handle karna
-        
-        let mediaUrl = "";
-        let mediaType = "unknown";
-
-        // Agar array hai (multiple images/videos)
-        if (Array.isArray(resultData)) {
-            mediaUrl = resultData[0].url;
-            mediaType = resultData[0].type || "video";
-        } 
-        // Agar single object hai
-        else if (resultData.url) {
-            // Kabhi kabhi 'url' array hota hai, kabhi string
-            mediaUrl = Array.isArray(resultData.url) ? resultData.url[0] : resultData.url;
-            mediaType = "media";
-        }
-
-        // 8. Final Splexxo Response
-        const brandedResponse = {
-            ...CONFIG.BRANDING,
-            status: "success",
-            post_info: {
-                // Agar upstream API caption deta hai to thik, nahi to default
-                caption: resultData.caption || "Instagram Post",
-                original_link: instaUrl
-            },
-            downloads: {
-                main_media: mediaUrl,
-                backup_link: mediaUrl // Backup ke liye same link
+            const data = await response.json();
+            
+            // Check agar data valid hai
+            if (data.status || data.result || data.data) {
+                finalData = data;
+                successSource = apiBase;
+                break; // Kaam ho gaya, loop roko
             }
-        };
+        } catch (e) {
+            console.error(`Failed source: ${apiBase}`, e.message);
+            // Ignore error and try next API
+        }
+    }
 
-        // 9. Cache & Send
-        cache.set(instaUrl, { timestamp: now, response: brandedResponse });
-        res.setHeader("X-Proxy-Cache", "MISS");
-        return res.status(200).json(brandedResponse);
-
-    } catch (error) {
-        return res.status(500).json({
+    // 6. Agar saare APIs fail ho gaye
+    if (!finalData) {
+        return res.status(502).json({
             status: false,
-            error: "Process Failed",
-            details: error.message,
-            suggestion: "Link check karein ya thodi der baad try karein."
+            error: "All Servers Busy",
+            message: "Humare dono servers abhi busy hain. Please 1 minute baad try karein."
         });
     }
+
+    // 7. Data Cleaning (Kyunki alag APIs ka format alag hota hai)
+    // Hum universal cleaner banayenge
+    let mediaUrl = "";
+    let caption = "Instagram Post";
+
+    try {
+        // Common patterns in public APIs
+        const result = finalData.data || finalData.result || finalData;
+        
+        if (Array.isArray(result)) {
+            mediaUrl = result.find(m => m.url)?.url || result[0].url;
+        } else {
+            mediaUrl = result.url || (Array.isArray(result.url) ? result.url[0] : result.url);
+        }
+
+        // Agar specific format hai (e.g. siputzx api)
+        if (!mediaUrl && result.media) {
+             mediaUrl = Array.isArray(result.media) ? result.media[0] : result.media;
+        }
+
+    } catch (e) {
+        mediaUrl = "Error parsing media";
+    }
+
+    // 8. Final Response
+    const brandedResponse = {
+        ...CONFIG.BRANDING,
+        server_used: successSource.includes("siputzx") ? "Server Alpha" : "Server Beta",
+        status: "success",
+        post_info: {
+            original_link: instaUrl
+        },
+        downloads: {
+            main_media: mediaUrl
+        }
+    };
+
+    // 9. Cache Save & Send
+    if (mediaUrl && mediaUrl.startsWith("http")) {
+        cache.set(instaUrl, { timestamp: now, response: brandedResponse });
+    }
+    
+    res.setHeader("X-Proxy-Cache", "MISS");
+    return res.status(200).json(brandedResponse);
 }
